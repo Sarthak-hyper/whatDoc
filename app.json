@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "whatdocs-app-legacy",
+    "name": "What Doc!!!",
     "slug": "whatdocs-app-legacy",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -12,25 +12,17 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "ios": {
-      "supportsTablet": true
-    },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
+      },
+      "package": "com.yourname.whatdocs"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "09bdfb83-3fab-4520-b658-ed2b2aaf35f2"
       }
-    },
-    "web": {
-      "bundler": "metro",
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
-    },
-    "plugins": [
-      "expo-router"
-    ],
-    "experiments": {
-      "typedRoutes": true
     }
   }
 }
