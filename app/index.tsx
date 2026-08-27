@@ -1,4 +1,4 @@
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
@@ -9,11 +9,14 @@ import {
   StyleSheet, 
   KeyboardAvoidingView, 
   Platform,
-  Alert
+  Alert,
+  Image
 } from 'react-native';
 import { initializeDatabase, getDatabase } from '../db/database';
 
 export default function App() {
+  const router = useRouter();
+  const params = useLocalSearchParams();
   // --- Scroll Reference for Auto-scrolling ---
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -24,6 +27,8 @@ export default function App() {
   const [gender, setGender] = useState('');
   const [phone, setPhone] = useState('');
   const [diagnosis, setDiagnosis] = useState('');
+  const [motherName, setMotherName] = useState('');
+  const [prescription, setPrescription] = useState(''); // NEW STATE
   
   // --- Data States ---
   const [searchQuery, setSearchQuery] = useState('');
@@ -38,9 +43,9 @@ export default function App() {
     setup();
   }, []);
 
-  useEffect(() => {
-    fetchPatients();
-  }, [searchQuery]);
+  // useEffect(() => {
+  //   fetchPatients();
+  // }, [searchQuery]);
 
   // --- Database Functions ---
 
@@ -48,8 +53,7 @@ export default function App() {
     try {
       const db = await getDatabase();
       const allRows = await db.getAllAsync(
-        'SELECT * FROM patients WHERE name LIKE ? ORDER BY created_at DESC;',
-        [`%${searchQuery}%`]
+        'SELECT * FROM patients ORDER BY created_at DESC;'
       );
       setPatients(allRows);
     } catch (error) {
@@ -58,7 +62,7 @@ export default function App() {
   };
 
   const handleSave = async () => {
-    if (!name.trim()) {
+    if (!name.trim() && !motherName.trim()) {
       Alert.alert("Missing Info", "Please enter a patient name!");
       return;
     }
@@ -68,15 +72,21 @@ export default function App() {
       await addPatient();
     }
   };
+  const getTimestamp = () => {
+  const pad = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+         `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+};
 
   const addPatient = async () => {
     try {
       const db = await getDatabase();
       await db.runAsync(
-        'INSERT INTO patients (name, age, gender, phone, diagnosis) VALUES (?, ?, ?, ?, ?);',
-        [name, parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit']
+        'INSERT INTO patients (name, mother_name, age, gender, phone, diagnosis, prescription, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+        [name, motherName || 'N/A', parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit', prescription || 'None', getTimestamp()]
       );
-      
       resetForm();
       fetchPatients();
       Alert.alert("Success", "Patient saved to local storage.");
@@ -85,14 +95,27 @@ export default function App() {
     }
   };
 
+  // --- Catch Incoming Edit Requests from Search Screen ---
+  useEffect(() => {
+    if (params.editPatientData) {
+      try {
+        const patientToEdit = JSON.parse(params.editPatientData as string);
+        handleEditClick(patientToEdit);
+        
+        // Clear the URL parameter so it doesn't re-trigger if they cancel the edit
+        router.setParams({ editPatientData: '' });
+      } catch (error) {
+        console.log("Error parsing incoming edit data:", error);
+      }
+    }
+  }, [params.editPatientData]);
   const updatePatient = async () => {
     try {
       const db = await getDatabase();
       await db.runAsync(
-        'UPDATE patients SET name = ?, age = ?, gender = ?, phone = ?, diagnosis = ? WHERE id = ?;',
-        [name, parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit', editingId]
+        'UPDATE patients SET name = ?, mother_name = ?, age = ?, gender = ?, phone = ?, diagnosis = ?, prescription = ? WHERE id = ?;',
+        [name, motherName || 'N/A', parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit', prescription || 'None', editingId]
       );
-      
       resetForm();
       fetchPatients();
       Alert.alert("Success", "Patient details updated.");
@@ -130,22 +153,27 @@ export default function App() {
   const handleEditClick = (patient: any) => {
     setEditingId(patient.id);
     setName(patient.name);
+    setMotherName(patient.mother_name || '');
     setAge(patient.age ? patient.age.toString() : '');
     setGender(patient.gender);
     setPhone(patient.phone);
     setDiagnosis(patient.diagnosis);
+    setPrescription(patient.prescription || ''); // Populate Prescription
 
-    // Smoothly scroll back to the top of the screen!
-    scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    setTimeout(() => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    }, 100);
   };
 
   const resetForm = () => {
     setEditingId(null);
     setName('');
+    setMotherName('');
     setAge('');
     setGender('');
     setPhone('');
     setDiagnosis('');
+    setPrescription(''); // Clear Prescription
     setSearchQuery('');
   };
 
@@ -164,7 +192,11 @@ export default function App() {
         keyboardDismissMode="on-drag"
       >
         {/* Branding Header */}
-        <Text style={styles.headerTitle}>WHAT doc!!!</Text>
+        {/* <Image 
+          source={require('../assets/images/icon.png')} 
+          style={styles.headerImage} 
+          resizeMode="contain"
+        /> */}
 
         {/* Input Form Card */}
         <View style={styles.card}>
@@ -173,15 +205,24 @@ export default function App() {
           </Text>
           
           <TextInput style={styles.input} placeholder="Patient Name" value={name} onChangeText={setName} />
-          
+          <TextInput style={styles.input} placeholder="Patient's Mother Name" value={motherName} onChangeText={setMotherName} />
           <View style={styles.row}>
             <TextInput style={[styles.input, styles.halfInput]} placeholder="Age" value={age} onChangeText={setAge} keyboardType="numeric" />
             <TextInput style={[styles.input, styles.halfInput]} placeholder="Gender" value={gender} onChangeText={setGender} />
           </View>
 
           <TextInput style={styles.input} placeholder="Phone Number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+          {/* <TextInput style={styles.input} placeholder="Diagnosis / Notes" value={diagnosis} onChangeText={setDiagnosis} multiline /> */}
           <TextInput style={styles.input} placeholder="Diagnosis / Notes" value={diagnosis} onChangeText={setDiagnosis} multiline />
-
+          
+          {/* NEW PRESCRIPTION INPUT */}
+          <TextInput 
+            style={[styles.input, { minHeight: 80, textAlignVertical: 'top' }]} 
+            placeholder="Doctor's Prescription..." 
+            value={prescription} 
+            onChangeText={setPrescription} 
+            multiline 
+          />
           {/* Dynamic Buttons */}
           <View style={styles.formActionRow}>
             <TouchableOpacity 
@@ -202,14 +243,12 @@ export default function App() {
         </View>
 
         {/* Search Bar */}
-        <View style={styles.searchContainer}>
-          <TextInput 
-            style={styles.searchInput} 
-            placeholder="Search patients by name..." 
-            value={searchQuery} 
-            onChangeText={setSearchQuery} 
-          />
-        </View>
+        <TouchableOpacity 
+          style={[styles.saveButton, { backgroundColor: '#8e44ad', marginBottom: 20 }]} 
+          onPress={() => router.push('/search')}
+        >
+          <Text style={styles.saveButtonText}>Search From Patients</Text>
+        </TouchableOpacity>
 
         {/* Saved Patients List */}
         <Text style={styles.sectionTitle}>Saved Patients ({patients.length})</Text>
@@ -230,10 +269,21 @@ export default function App() {
                 </TouchableOpacity>
               </View>
             </View>
-
+            <Text style={styles.dateText}>
+              Last Visited: {patient.created_at ? new Date(patient.created_at).toLocaleString() : 'Unknown Date'}
+            </Text><Text style={styles.patientDetail}>Mother name: {patient.mother_name}</Text>
             <Text style={styles.patientDetail}>Age: {patient.age} | Gender: {patient.gender}</Text>
             <Text style={styles.patientDetail}>Phone: {patient.phone}</Text>
             <Text style={styles.patientDetail}>Diagnosis: {patient.diagnosis}</Text>
+            {/* <Text style={styles.patientDetail}>Diagnosis: {patient.diagnosis}</Text> */}
+            
+            {/* NEW PRESCRIPTION DISPLAY */}
+            {patient.prescription && patient.prescription !== 'None' && (
+              <View style={{ marginTop: 8, padding: 8, backgroundColor: '#f0f8ff', borderRadius: 5 }}>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#2980b9' }}>Rx / Prescription:</Text>
+                <Text style={{ fontSize: 14, color: '#34495e', marginTop: 2 }}>{patient.prescription}</Text>
+              </View>
+            )}
           </View>
         ))}
 
@@ -367,5 +417,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#7f8c8d',
     marginTop: 4,
+  },
+  dateText: {
+    fontSize: 12,
+    color: '#bdc3c7', // A nice subtle light gray
+    fontStyle: 'italic',
+    marginBottom: 6,
+  },
+  headerImage: {
+    width: '100%',
+    height: 120, // You can make this number bigger or smaller to change the logo size
+    marginBottom: 20,
+    alignSelf: 'center',
   },
 });
