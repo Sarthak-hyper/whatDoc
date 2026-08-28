@@ -1,5 +1,7 @@
-import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
-import React, { useState, useEffect, useRef } from 'react';
+import { Stack, useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+// Initialize AWS connection
+import '../aws-config';
 import { 
   View, 
   Text, 
@@ -34,14 +36,22 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [patients, setPatients] = useState<any[]>([]);
 
-  // --- Initialization ---
+ // --- Initialization ---
+  
+  // 1. Initialize the database only ONCE when the app opens
   useEffect(() => {
     const setup = async () => {
       await initializeDatabase();
-      fetchPatients();
     };
     setup();
   }, []);
+
+  // 2. Fetch the data EVERY TIME the screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      fetchPatients();
+    }, [])
+  );
 
   // useEffect(() => {
   //   fetchPatients();
@@ -249,7 +259,13 @@ export default function App() {
         >
           <Text style={styles.saveButtonText}>Search From Patients</Text>
         </TouchableOpacity>
-
+         {/* Navigation to Cloud Auth Screen */}
+        <TouchableOpacity 
+          style={[styles.saveButton, { backgroundColor: '#2980b9', marginBottom: 20 }]} 
+          onPress={() => router.push('/auth')}
+        >
+          <Text style={styles.saveButtonText}>☁️ Cloud Vault Sync</Text>
+        </TouchableOpacity>
         {/* Saved Patients List */}
         <Text style={styles.sectionTitle}>Saved Patients ({patients.length})</Text>
         
