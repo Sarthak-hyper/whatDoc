@@ -1,6 +1,5 @@
 import { Stack, useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-// Initialize AWS connection
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import '../aws-config';
 import { 
   View, 
@@ -12,14 +11,16 @@ import {
   KeyboardAvoidingView, 
   Platform,
   Alert,
-  Image
+  ActivityIndicator
 } from 'react-native';
 import { initializeDatabase, getDatabase } from '../db/database';
+
+const AI_ASSIST_URL = process.env.EXPO_PUBLIC_AI_ASSIST_URL || '';
+const AI_DEMO_KEY = process.env.EXPO_PUBLIC_AI_DEMO_KEY || '';
 
 export default function App() {
   const router = useRouter();
   const params = useLocalSearchParams();
-  // --- Scroll Reference for Auto-scrolling ---
   const scrollViewRef = useRef<ScrollView>(null);
 
   // --- Form States ---
@@ -30,15 +31,17 @@ export default function App() {
   const [phone, setPhone] = useState('');
   const [diagnosis, setDiagnosis] = useState('');
   const [motherName, setMotherName] = useState('');
-  const [prescription, setPrescription] = useState(''); // NEW STATE
+  const [prescription, setPrescription] = useState('');
+
+  // --- AI Assist States ---
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiRecommendation, setAiRecommendation] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
   
   // --- Data States ---
-  const [searchQuery, setSearchQuery] = useState('');
   const [patients, setPatients] = useState<any[]>([]);
 
- // --- Initialization ---
-  
-  // 1. Initialize the database only ONCE when the app opens
+  // --- Initialization ---
   useEffect(() => {
     const setup = async () => {
       await initializeDatabase();
@@ -46,19 +49,13 @@ export default function App() {
     setup();
   }, []);
 
-  // 2. Fetch the data EVERY TIME the screen comes into focus
   useFocusEffect(
     useCallback(() => {
       fetchPatients();
     }, [])
   );
 
-  // useEffect(() => {
-  //   fetchPatients();
-  // }, [searchQuery]);
-
   // --- Database Functions ---
-
   const fetchPatients = async () => {
     try {
       const db = await getDatabase();
@@ -69,6 +66,80 @@ export default function App() {
     } catch (error) {
       console.log("Error fetching patients:", error);
     }
+  };
+
+  // --- AI Assist RAG Handler ---
+  const handleAiAssist = async () => {
+    const cleanDiagnosis = diagnosis.trim().slice(0, 200);
+    if (!cleanDiagnosis) {
+      Alert.alert("Diagnosis Required", "Please enter a diagnosis before using AI Assist.");
+      return;
+    }
+
+    if (!AI_ASSIST_URL || !AI_DEMO_KEY) {
+      setAiError("AI Assist is not configured. Check EXPO_PUBLIC_AI_ASSIST_URL and EXPO_PUBLIC_AI_DEMO_KEY in .env.");
+      return;
+    }
+
+    setAiLoading(true);
+    setAiError(null);
+    setAiRecommendation(null);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+
+    try {
+      // PRIVACY RULE: Only send diagnosis, age, and gender (never name, phone, or mother_name)
+      const payload: { diagnosis: string; age?: number; gender?: string } = {
+        diagnosis: cleanDiagnosis,
+      };
+      const parsedAge = parseInt(age, 10);
+      if (!isNaN(parsedAge) && parsedAge > 0) {
+        payload.age = parsedAge;
+      }
+      if (gender.trim()) {
+        payload.gender = gender.trim();
+      }
+
+      const response = await fetch(AI_ASSIST_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-demo-key': AI_DEMO_KEY,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Unauthorized: Check your demo secret key.");
+        }
+        throw new Error(data.error || `Server responded with status ${response.status}`);
+      }
+
+      setAiRecommendation(data.recommendation || "No recommendation returned.");
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        setAiError("Request timed out after 25 seconds. Please try again.");
+      } else if (error?.message?.includes('Network request failed')) {
+        setAiError("Needs internet connection for AI Assist. All offline features still work normally.");
+      } else {
+        setAiError(error?.message || "Could not reach AI Assist right now. Offline features still work normally.");
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      setAiLoading(false);
+    }
+  };
+
+  const handleInsertAiSuggestion = () => {
+    if (!aiRecommendation) return;
+    setPrescription((prev) =>
+      prev.trim() ? `${prev.trim()}\n\n${aiRecommendation}` : aiRecommendation
+    );
   };
 
   const handleSave = async () => {
@@ -82,20 +153,29 @@ export default function App() {
       await addPatient();
     }
   };
+
   const getTimestamp = () => {
-  const pad = (n) => String(n).padStart(2, '0');
-  const now = new Date();
-  
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-         `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-};
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const now = new Date();
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  };
 
   const addPatient = async () => {
     try {
       const db = await getDatabase();
       await db.runAsync(
         'INSERT INTO patients (name, mother_name, age, gender, phone, diagnosis, prescription, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
-        [name, motherName || 'N/A', parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit', prescription || 'None', getTimestamp()]
+        [
+          name.trim(), 
+          motherName.trim() || 'N/A', 
+          parseInt(age) || 0, 
+          gender.trim() || 'Not Specified', 
+          phone.trim() || 'N/A', 
+          diagnosis.trim() || 'General Visit', 
+          prescription.trim() || 'None', 
+          getTimestamp()
+        ]
       );
       resetForm();
       fetchPatients();
@@ -105,26 +185,33 @@ export default function App() {
     }
   };
 
-  // --- Catch Incoming Edit Requests from Search Screen ---
   useEffect(() => {
-    if (params.editPatientData) {
+    if (params.editPatientData && typeof params.editPatientData === 'string') {
       try {
-        const patientToEdit = JSON.parse(params.editPatientData as string);
+        const patientToEdit = JSON.parse(params.editPatientData);
         handleEditClick(patientToEdit);
-        
-        // Clear the URL parameter so it doesn't re-trigger if they cancel the edit
-        router.setParams({ editPatientData: '' });
+        router.setParams({ editPatientData: undefined });
       } catch (error) {
         console.log("Error parsing incoming edit data:", error);
       }
     }
   }, [params.editPatientData]);
+
   const updatePatient = async () => {
     try {
       const db = await getDatabase();
       await db.runAsync(
         'UPDATE patients SET name = ?, mother_name = ?, age = ?, gender = ?, phone = ?, diagnosis = ?, prescription = ? WHERE id = ?;',
-        [name, motherName || 'N/A', parseInt(age) || 0, gender || 'Not Specified', phone || 'N/A', diagnosis || 'General Visit', prescription || 'None', editingId]
+        [
+          name.trim(), 
+          motherName.trim() || 'N/A', 
+          parseInt(age) || 0, 
+          gender.trim() || 'Not Specified', 
+          phone.trim() || 'N/A', 
+          diagnosis.trim() || 'General Visit', 
+          prescription.trim() || 'None', 
+          editingId
+        ]
       );
       resetForm();
       fetchPatients();
@@ -138,15 +225,12 @@ export default function App() {
     try {
       const db = await getDatabase();
       await db.runAsync('DELETE FROM patients WHERE id = ?;', [id]);
-      
       if (editingId === id) resetForm(); 
       fetchPatients();
     } catch (error: any) {
       Alert.alert("Error", "Failed to delete: " + (error?.message || JSON.stringify(error)));
     }
   };
-
-  // --- UI Helpers ---
 
   const confirmDelete = (id: number, patientName: string) => {
     Alert.alert(
@@ -159,16 +243,17 @@ export default function App() {
     );
   };
 
-  // Triggered when "Edit" is tapped
   const handleEditClick = (patient: any) => {
     setEditingId(patient.id);
-    setName(patient.name);
+    setName(patient.name || '');
     setMotherName(patient.mother_name || '');
     setAge(patient.age ? patient.age.toString() : '');
-    setGender(patient.gender);
-    setPhone(patient.phone);
-    setDiagnosis(patient.diagnosis);
-    setPrescription(patient.prescription || ''); // Populate Prescription
+    setGender(patient.gender || '');
+    setPhone(patient.phone || '');
+    setDiagnosis(patient.diagnosis || '');
+    setPrescription(patient.prescription || '');
+    setAiRecommendation(null);
+    setAiError(null);
 
     setTimeout(() => {
       scrollViewRef.current?.scrollTo({ y: 0, animated: true });
@@ -183,32 +268,23 @@ export default function App() {
     setGender('');
     setPhone('');
     setDiagnosis('');
-    setPrescription(''); // Clear Prescription
-    setSearchQuery('');
+    setPrescription('');
+    setAiRecommendation(null);
+    setAiError(null);
   };
 
-  // --- UI Render ---
   return (
     <KeyboardAvoidingView 
       style={{ flex: 1, backgroundColor: '#f5f5f5' }} 
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {/* ADD THIS LINE RIGHT HERE to hide the default header */}
       <Stack.Screen options={{ headerShown: false }} />
       <ScrollView 
-        ref={scrollViewRef} // Attached the reference here!
+        ref={scrollViewRef} 
         contentContainerStyle={styles.scroll} 
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
       >
-        {/* Branding Header */}
-        {/* <Image 
-          source={require('../assets/images/icon.png')} 
-          style={styles.headerImage} 
-          resizeMode="contain"
-        /> */}
-
-        {/* Input Form Card */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>
             {editingId ? "Edit Patient Details" : "Add New Patient"}
@@ -222,10 +298,62 @@ export default function App() {
           </View>
 
           <TextInput style={styles.input} placeholder="Phone Number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
-          {/* <TextInput style={styles.input} placeholder="Diagnosis / Notes" value={diagnosis} onChangeText={setDiagnosis} multiline /> */}
-          <TextInput style={styles.input} placeholder="Diagnosis / Notes" value={diagnosis} onChangeText={setDiagnosis} multiline />
+          <TextInput 
+            style={styles.input} 
+            placeholder="Diagnosis / Notes (e.g., Acute Bronchitis)" 
+            value={diagnosis} 
+            onChangeText={setDiagnosis} 
+            maxLength={200}
+            multiline 
+          />
+
+          {/* AI ASSIST TRIGGER BUTTON */}
+          <TouchableOpacity
+            style={[
+              styles.aiButton,
+              (aiLoading || !diagnosis.trim()) && styles.aiButtonDisabled,
+            ]}
+            onPress={handleAiAssist}
+            disabled={aiLoading || !diagnosis.trim()}
+          >
+            {aiLoading ? (
+              <View style={styles.aiButtonContent}>
+                <ActivityIndicator size="small" color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.aiButtonText}>Searching Medical Library...</Text>
+              </View>
+            ) : (
+              <Text style={styles.aiButtonText}>✨ AI Assist</Text>
+            )}
+          </TouchableOpacity>
+
+          {/* AI ERROR BANNER */}
+          {aiError && (
+            <View style={styles.aiErrorBox}>
+              <Text style={styles.aiErrorText}>{aiError}</Text>
+            </View>
+          )}
+
+          {/* AI SUGGESTION PREVIEW CARD */}
+          {aiRecommendation && (
+            <View style={styles.aiCard}>
+              <View style={styles.aiCardHeader}>
+                <Text style={styles.aiDisclaimerBadge}>⚠️ AI suggestion, doctor must verify</Text>
+                <TouchableOpacity onPress={() => setAiRecommendation(null)}>
+                  <Text style={styles.aiDismissText}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.aiCardBody}>{aiRecommendation}</Text>
+
+              <TouchableOpacity
+                style={styles.aiInsertButton}
+                onPress={handleInsertAiSuggestion}
+              >
+                <Text style={styles.aiInsertButtonText}>⬇ Insert into Prescription</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           
-          {/* NEW PRESCRIPTION INPUT */}
           <TextInput 
             style={[styles.input, { minHeight: 80, textAlignVertical: 'top' }]} 
             placeholder="Doctor's Prescription..." 
@@ -233,7 +361,7 @@ export default function App() {
             onChangeText={setPrescription} 
             multiline 
           />
-          {/* Dynamic Buttons */}
+
           <View style={styles.formActionRow}>
             <TouchableOpacity 
               style={[styles.saveButton, editingId ? styles.updateButton : null]} 
@@ -252,30 +380,26 @@ export default function App() {
           </View>
         </View>
 
-        {/* Search Bar */}
         <TouchableOpacity 
           style={[styles.saveButton, { backgroundColor: '#8e44ad', marginBottom: 20 }]} 
           onPress={() => router.push('/search')}
         >
           <Text style={styles.saveButtonText}>Search From Patients</Text>
         </TouchableOpacity>
-         {/* Navigation to Cloud Auth Screen */}
+
         <TouchableOpacity 
           style={[styles.saveButton, { backgroundColor: '#2980b9', marginBottom: 20 }]} 
           onPress={() => router.push('/auth')}
         >
           <Text style={styles.saveButtonText}>☁️ Cloud Vault Sync</Text>
         </TouchableOpacity>
-        {/* Saved Patients List */}
+
         <Text style={styles.sectionTitle}>Saved Patients ({patients.length})</Text>
         
         {patients.map((patient) => (
           <View key={patient.id} style={styles.patientCard}>
-            
             <View style={styles.cardHeader}>
               <Text style={styles.patientName}>{patient.name}</Text>
-              
-              {/* Edit & Delete Action Buttons */}
               <View style={styles.actionButtons}>
                 <TouchableOpacity onPress={() => handleEditClick(patient)} style={{ marginRight: 15 }}>
                   <Text style={styles.editText}>Edit</Text>
@@ -287,13 +411,12 @@ export default function App() {
             </View>
             <Text style={styles.dateText}>
               Last Visited: {patient.created_at ? new Date(patient.created_at).toLocaleString() : 'Unknown Date'}
-            </Text><Text style={styles.patientDetail}>Mother name: {patient.mother_name}</Text>
+            </Text>
+            <Text style={styles.patientDetail}>Mother name: {patient.mother_name}</Text>
             <Text style={styles.patientDetail}>Age: {patient.age} | Gender: {patient.gender}</Text>
             <Text style={styles.patientDetail}>Phone: {patient.phone}</Text>
             <Text style={styles.patientDetail}>Diagnosis: {patient.diagnosis}</Text>
-            {/* <Text style={styles.patientDetail}>Diagnosis: {patient.diagnosis}</Text> */}
             
-            {/* NEW PRESCRIPTION DISPLAY */}
             {patient.prescription && patient.prescription !== 'None' && (
               <View style={{ marginTop: 8, padding: 8, backgroundColor: '#f0f8ff', borderRadius: 5 }}>
                 <Text style={{ fontSize: 14, fontWeight: '600', color: '#2980b9' }}>Rx / Prescription:</Text>
@@ -302,7 +425,6 @@ export default function App() {
             )}
           </View>
         ))}
-
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -315,13 +437,6 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingTop: 50,
     paddingBottom: 60,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#2c3e50',
-    textAlign: 'center',
-    marginBottom: 20,
   },
   card: {
     backgroundColor: '#fff',
@@ -353,6 +468,83 @@ const styles = StyleSheet.create({
   },
   halfInput: {
     width: '48%',
+  },
+  aiButton: {
+    backgroundColor: '#6c5ce7',
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  aiButtonDisabled: {
+    backgroundColor: '#b2bec3',
+  },
+  aiButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  aiButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  aiErrorBox: {
+    backgroundColor: '#ffeaa7',
+    borderLeftWidth: 4,
+    borderLeftColor: '#d63031',
+    padding: 10,
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  aiErrorText: {
+    color: '#2d3436',
+    fontSize: 13,
+  },
+  aiCard: {
+    backgroundColor: '#f4f1ff',
+    borderWidth: 1,
+    borderColor: '#a29bfe',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+  },
+  aiCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  aiDisclaimerBadge: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#d35400',
+    backgroundColor: '#fdebd0',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  aiDismissText: {
+    fontSize: 12,
+    color: '#636e72',
+    fontWeight: '600',
+  },
+  aiCardBody: {
+    fontSize: 14,
+    color: '#2d3436',
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  aiInsertButton: {
+    backgroundColor: '#00b894',
+    paddingVertical: 9,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  aiInsertButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
   },
   formActionRow: {
     flexDirection: 'row',
@@ -386,16 +578,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     fontSize: 16,
-  },
-  searchContainer: {
-    marginBottom: 15,
-  },
-  searchInput: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#3498db',
-    padding: 12,
-    borderRadius: 8,
   },
   patientCard: {
     backgroundColor: '#fff',
@@ -436,14 +618,8 @@ const styles = StyleSheet.create({
   },
   dateText: {
     fontSize: 12,
-    color: '#bdc3c7', // A nice subtle light gray
+    color: '#bdc3c7',
     fontStyle: 'italic',
     marginBottom: 6,
-  },
-  headerImage: {
-    width: '100%',
-    height: 120, // You can make this number bigger or smaller to change the logo size
-    marginBottom: 20,
-    alignSelf: 'center',
   },
 });
